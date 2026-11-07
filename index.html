@@ -13,7 +13,7 @@
 :root[data-theme="dark"]{--bg:#0f1318;--fg:#eef1f5;--mut:#98a1ae;--card:#1a2029;--line:#2c3541;--acc:#4da3ff;color-scheme:dark}
 html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
 body{min-height:100%;display:flex;flex-direction:column;align-items:center;padding:16px;gap:14px}
-h1{font-size:15px;font-weight:600;color:var(--mut);margin:4px 0 0;letter-spacing:.04em;text-transform:uppercase}
+h1{font-size:15px;font-weight:600;color:var(--mut);margin:4px 0 0;letter-spacing:.04em;text-transform:uppercase;white-space:nowrap}
 .dial{width:min(78vw,300px);aspect-ratio:1;background:var(--card);border:1px solid var(--line);border-radius:50%;position:relative}
 .dial svg{position:absolute;inset:0;width:100%;height:100%}
 #arrow{transform-origin:50% 50%;transition:transform .12s linear}
@@ -24,12 +24,13 @@ h1{font-size:15px;font-weight:600;color:var(--mut);margin:4px 0 0;letter-spacing
 button{flex:1;font:inherit;font-size:16px;font-weight:600;padding:14px 8px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
 button.p{background:var(--acc);color:#fff;border-color:var(--acc)}
 button.on{outline:3px solid var(--acc)}
+button:disabled{opacity:.55}
 #msg{color:#d97706;font-size:14px;text-align:center;min-height:20px;max-width:340px}
 .hint{color:var(--mut);font-size:13px;text-align:center;max-width:340px;line-height:1.4}
 </style>
 </head>
 <body>
-<h1>Nagib / pad</h1>
+<h1>Nagib/pad</h1>
 <div class="dial">
   <svg viewBox="0 0 200 200" aria-hidden="true">
     <circle cx="100" cy="100" r="92" fill="none" stroke="var(--line)" stroke-width="1"/>
@@ -42,19 +43,41 @@ button.on{outline:3px solid var(--acc)}
 <div id="val">–,–<small>%</small></div>
 <div id="sub">Strelica pokazuje smjer pada (kamo teče voda)</div>
 <div id="msg"></div>
-<div class="row">
+<div class="row" id="startRow">
   <button id="start" class="p">Pokreni senzor</button>
+</div>
+<div class="row">
   <button id="zero">Nuliraj</button>
+  <button id="reset">Resetiraj</button>
   <button id="hold">Zadrži</button>
 </div>
-<div class="hint">Mobitel položite ravno, zaslonom prema gore, na cijev ili letvu. Prije mjerenja nulirajte na ravnoj podlozi. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite srednju vrijednost.</div>
+<div class="hint">Mobitel položite ravno, zaslonom prema gore, na cijev ili letvu. Prije mjerenja nulirajte na ravnoj podlozi; nula ostaje zapamćena dok ne pritisnete Resetiraj. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite srednju vrijednost.</div>
 <script>
 (function(){
   var ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
-  var sm=null, off={x:0,y:0}, held=false, lastEv=0, shown=null;
+  var sm=null, off={x:0,y:0}, held=false, lastEv=0, shown=null, lastT=0, listening=false;
+  var TAU=0.35; // vremenska konstanta izglađivanja u sekundama
+  var zeroBtn=document.getElementById('zero'), wl=null;
   var val=document.getElementById('val'), arrow=document.getElementById('arrow'),
       msg=document.getElementById('msg'), sub=document.getElementById('sub');
-  try{var s=JSON.parse(localStorage.getItem('nagibOff')||'null'); if(s&&isFinite(s.x)&&isFinite(s.y)) off=s;}catch(e){}
+  var zeroed=false;
+  try{var s=JSON.parse(localStorage.getItem('nagibOff')||'null'); if(s&&isFinite(s.x)&&isFinite(s.y)){off=s; zeroed=true;}}catch(e){}
+
+  function showZero(){
+    zeroBtn.disabled=zeroed;
+    zeroBtn.textContent=zeroed?'Nulirano':'Nuliraj';
+  }
+  showZero();
+
+  // Ekran ostaje upaljen dok je aplikacija otvorena
+  function keepAwake(){
+    if(wl||!('wakeLock' in navigator)||document.visibilityState!=='visible') return;
+    navigator.wakeLock.request('screen').then(function(l){
+      wl=l; l.addEventListener('release',function(){wl=null;});
+    }).catch(function(){});
+  }
+  document.addEventListener('visibilitychange',keepAwake);
+  keepAwake();
 
   function fmt(n){return n.toFixed(1).replace('.',',');}
 
@@ -70,8 +93,14 @@ button.on{outline:3px solid var(--acc)}
     }
     msg.textContent='';
     var tx=ax/az, ty=ay/az;
+    var now=performance.now();
     if(!sm) sm={x:tx,y:ty};
-    else {sm.x+=(tx-sm.x)*0.15; sm.y+=(ty-sm.y)*0.15;}
+    else {
+      var dt=Math.min(Math.max((now-lastT)/1000,0.001),0.2);
+      var k=1-Math.exp(-dt/TAU);
+      sm.x+=(tx-sm.x)*k; sm.y+=(ty-sm.y)*k;
+    }
+    lastT=now;
     if(!held) render();
   }
 
@@ -86,6 +115,9 @@ button.on{outline:3px solid var(--acc)}
   }
 
   function listen(){
+    keepAwake();
+    if(listening) return;
+    listening=true;
     window.addEventListener('devicemotion',onMotion);
     setTimeout(function(){
       if(!lastEv) msg.textContent='Senzor nije dostupan. Otvorite stranicu izravno u pregledniku (Chrome) i dopustite pristup senzorima.';
@@ -99,14 +131,20 @@ button.on{outline:3px solid var(--acc)}
         if(r==='granted') listen(); else msg.textContent='Pristup senzorima nije odobren.';
       }).catch(function(){msg.textContent='Pristup senzorima nije odobren.';});
     } else listen();
-    this.style.display='none';
+    document.getElementById('startRow').style.display='none';
   });
 
-  document.getElementById('zero').addEventListener('click',function(){
-    if(!sm) return;
-    off={x:sm.x,y:sm.y};
+  zeroBtn.addEventListener('click',function(){
+    if(!sm||zeroed) return;
+    off={x:sm.x,y:sm.y}; zeroed=true;
     try{localStorage.setItem('nagibOff',JSON.stringify(off));}catch(e){}
-    render();
+    showZero(); render();
+  });
+
+  document.getElementById('reset').addEventListener('click',function(){
+    off={x:0,y:0}; zeroed=false;
+    try{localStorage.removeItem('nagibOff');}catch(e){}
+    showZero(); render();
   });
 
   document.getElementById('hold').addEventListener('click',function(){
@@ -116,7 +154,10 @@ button.on{outline:3px solid var(--acc)}
     if(!held) render();
   });
 
-  if(!(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function')) listen();
+  if(!(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function')){
+    document.getElementById('startRow').style.display='none';
+    listen();
+  }
   if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
 })();
 </script>
