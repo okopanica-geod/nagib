@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="hr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Nagib u %</title>
+<link rel="manifest" href="manifest.webmanifest">
+<meta name="theme-color" content="#0a7cff">
+<link rel="apple-touch-icon" href="icon-192.png">
+<style>
+:root{--bg:#f4f5f7;--fg:#14181f;--mut:#6b7280;--card:#fff;--line:#d5d9e0;--acc:#0a7cff;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px);color-scheme:light}
+@media (prefers-color-scheme:dark){:root:not([data-theme="light"]){--bg:#0f1318;--fg:#eef1f5;--mut:#98a1ae;--card:#1a2029;--line:#2c3541;--acc:#4da3ff;color-scheme:dark}}
+:root[data-theme="dark"]{--bg:#0f1318;--fg:#eef1f5;--mut:#98a1ae;--card:#1a2029;--line:#2c3541;--acc:#4da3ff;color-scheme:dark}
+html,body{margin:0;background:var(--bg);color:var(--fg);font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif}
+body{min-height:100%;display:flex;flex-direction:column;align-items:center;padding:16px;gap:14px}
+h1{font-size:15px;font-weight:600;color:var(--mut);margin:4px 0 0;letter-spacing:.04em;text-transform:uppercase}
+.dial{width:min(78vw,300px);aspect-ratio:1;background:var(--card);border:1px solid var(--line);border-radius:50%;position:relative}
+.dial svg{position:absolute;inset:0;width:100%;height:100%}
+#arrow{transform-origin:50% 50%;transition:transform .12s linear}
+#val{font-size:64px;font-weight:700;font-variant-numeric:tabular-nums;line-height:1}
+#val small{font-size:30px;font-weight:600;color:var(--mut);margin-left:4px}
+#sub{color:var(--mut);font-size:14px;text-align:center;min-height:20px}
+.row{display:flex;gap:10px;width:min(92vw,360px)}
+button{flex:1;font:inherit;font-size:16px;font-weight:600;padding:14px 8px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
+button.p{background:var(--acc);color:#fff;border-color:var(--acc)}
+button.on{outline:3px solid var(--acc)}
+#msg{color:#d97706;font-size:14px;text-align:center;min-height:20px;max-width:340px}
+.hint{color:var(--mut);font-size:13px;text-align:center;max-width:340px;line-height:1.4}
+</style>
+</head>
+<body>
+<h1>Nagib / pad</h1>
+<div class="dial">
+  <svg viewBox="0 0 200 200" aria-hidden="true">
+    <circle cx="100" cy="100" r="92" fill="none" stroke="var(--line)" stroke-width="1"/>
+    <circle cx="100" cy="100" r="3" fill="var(--mut)"/>
+    <g id="arrow" style="opacity:.25">
+      <path d="M100 22 L128 74 L108 74 L108 150 L92 150 L92 74 L72 74 Z" fill="var(--acc)"/>
+    </g>
+  </svg>
+</div>
+<div id="val">–,–<small>%</small></div>
+<div id="sub">Strelica pokazuje smjer pada (kamo teče voda)</div>
+<div id="msg"></div>
+<div class="row">
+  <button id="start" class="p">Pokreni senzor</button>
+  <button id="zero">Nuliraj</button>
+  <button id="hold">Zadrži</button>
+</div>
+<div class="hint">Mobitel položite ravno, zaslonom prema gore, na cijev ili letvu. Prije mjerenja nulirajte na ravnoj podlozi. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite srednju vrijednost.</div>
+<script>
+(function(){
+  var ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
+  var sm=null, off={x:0,y:0}, held=false, lastEv=0, shown=null;
+  var val=document.getElementById('val'), arrow=document.getElementById('arrow'),
+      msg=document.getElementById('msg'), sub=document.getElementById('sub');
+  try{var s=JSON.parse(localStorage.getItem('nagibOff')||'null'); if(s&&isFinite(s.x)&&isFinite(s.y)) off=s;}catch(e){}
+
+  function fmt(n){return n.toFixed(1).replace('.',',');}
+
+  function onMotion(e){
+    var a=e.accelerationIncludingGravity;
+    if(!a||a.x==null||a.y==null||a.z==null) return;
+    lastEv=Date.now();
+    var ax=a.x, ay=a.y, az=a.z;
+    if(ios){ax=-ax;ay=-ay;az=-az;}
+    if(az<1.5){
+      msg.textContent='Položite mobitel ravno, zaslonom prema gore.';
+      return;
+    }
+    msg.textContent='';
+    var tx=ax/az, ty=ay/az;
+    if(!sm) sm={x:tx,y:ty};
+    else {sm.x+=(tx-sm.x)*0.15; sm.y+=(ty-sm.y)*0.15;}
+    if(!held) render();
+  }
+
+  function render(){
+    if(!sm) return;
+    var dx=-(sm.x-off.x), dyUp=-(sm.y-off.y);
+    var pct=100*Math.hypot(dx,dyUp);
+    var rot=Math.atan2(dx,dyUp)*180/Math.PI;
+    val.innerHTML=fmt(pct)+'<small>%</small>';
+    arrow.style.transform='rotate('+rot.toFixed(1)+'deg)';
+    arrow.style.opacity=pct<0.1?'.25':'1';
+  }
+
+  function listen(){
+    window.addEventListener('devicemotion',onMotion);
+    setTimeout(function(){
+      if(!lastEv) msg.textContent='Senzor nije dostupan. Otvorite stranicu izravno u pregledniku (Chrome) i dopustite pristup senzorima.';
+    },2500);
+  }
+
+  document.getElementById('start').addEventListener('click',function(){
+    var D=window.DeviceMotionEvent;
+    if(D&&typeof D.requestPermission==='function'){
+      D.requestPermission().then(function(r){
+        if(r==='granted') listen(); else msg.textContent='Pristup senzorima nije odobren.';
+      }).catch(function(){msg.textContent='Pristup senzorima nije odobren.';});
+    } else listen();
+    this.style.display='none';
+  });
+
+  document.getElementById('zero').addEventListener('click',function(){
+    if(!sm) return;
+    off={x:sm.x,y:sm.y};
+    try{localStorage.setItem('nagibOff',JSON.stringify(off));}catch(e){}
+    render();
+  });
+
+  document.getElementById('hold').addEventListener('click',function(){
+    held=!held;
+    this.classList.toggle('on',held);
+    this.textContent=held?'Pusti':'Zadrži';
+    if(!held) render();
+  });
+
+  if(!(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function')) listen();
+  if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
+})();
+</script>
+</body>
+</html>
