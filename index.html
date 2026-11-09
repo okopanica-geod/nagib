@@ -23,9 +23,11 @@ h1{font-size:15px;font-weight:600;color:var(--mut);margin:4px 0 0;letter-spacing
 .row{display:flex;gap:10px;width:min(92vw,360px)}
 button{flex:1;font:inherit;font-size:16px;font-weight:600;padding:14px 8px;border-radius:12px;border:1px solid var(--line);background:var(--card);color:var(--fg)}
 button.p{background:var(--acc);color:#fff;border-color:var(--acc)}
-button.on{outline:3px solid var(--acc)}
+button.on,button.hold{outline:3px solid var(--acc)}
+button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:none}
 button:disabled{opacity:.55}
 #msg{color:#d97706;font-size:14px;text-align:center;min-height:20px;max-width:340px}
+.note{color:var(--mut);font-size:12px;text-align:center;margin-top:-8px}
 .hint{color:var(--mut);font-size:13px;text-align:center;max-width:340px;line-height:1.4}
 </style>
 </head>
@@ -43,25 +45,28 @@ button:disabled{opacity:.55}
 <div id="val">–,–<small>%</small></div>
 <div id="sub">Strelica pokazuje smjer pada (kamo teče voda)</div>
 <div id="msg"></div>
-<div class="row" id="startRow">
-  <button id="start" class="p">Pokreni senzor</button>
-</div>
 <div class="row">
   <button id="zero">Nuliraj</button>
   <button id="reset">Resetiraj</button>
   <button id="hold">Zadrži</button>
 </div>
-<div class="hint">Mobitel položite ravno, zaslonom prema gore, na cijev ili letvu. Prije mjerenja nulirajte na ravnoj podlozi; nula ostaje zapamćena dok ne pritisnete Resetiraj. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite sredinu.</div>
+<div class="note">Nuliraj i Resetiraj: držati 1 s</div>
+<div class="hint">Mobitel položite dužom stranom uz cijev ili letvu; smije biti zakrenut oko duže osi (i na boku). Prije mjerenja nulirajte na ravnoj podlozi; nula ostaje zapamćena dok ne pritisnete Resetiraj. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite srednju vrijednost.</div>
 <script>
 (function(){
   var ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
-  var sm=null, off={x:0,y:0}, held=false, lastEv=0, shown=null, lastT=0, listening=false;
   var TAU=0.35; // vremenska konstanta izglađivanja u sekundama
-  var zeroBtn=document.getElementById('zero'), wl=null;
+  var sm=null, off=0, zeroed=false, held=false, lastEv=0, lastT=0, listening=false, wl=null;
   var val=document.getElementById('val'), arrow=document.getElementById('arrow'),
-      msg=document.getElementById('msg'), sub=document.getElementById('sub');
-  var zeroed=false;
-  try{var s=JSON.parse(localStorage.getItem('nagibOff')||'null'); if(s&&isFinite(s.x)&&isFinite(s.y)){off=s; zeroed=true;}}catch(e){}
+      msg=document.getElementById('msg'), zeroBtn=document.getElementById('zero'),
+      resetBtn=document.getElementById('reset');
+
+  // Nula (samo duža os); stara nula iz prijašnje verzije se odbacuje
+  try{
+    localStorage.removeItem('nagibOff');
+    var s=parseFloat(localStorage.getItem('nagibOffY'));
+    if(isFinite(s)){off=s; zeroed=true;}
+  }catch(e){}
 
   function showZero(){
     zeroBtn.disabled=zeroed;
@@ -87,30 +92,30 @@ button:disabled{opacity:.55}
     lastEv=Date.now();
     var ax=a.x, ay=a.y, az=a.z;
     if(ios){ax=-ax;ay=-ay;az=-az;}
-    if(az<1.5){
-      msg.textContent='Položite mobitel ravno, zaslonom prema gore.';
+    // Nagib duže osi (y) prema horizontali; ne ovisi o zakretu oko te osi
+    var h=Math.hypot(ax,az);
+    if(h<1.5){
+      msg.textContent='Mobitel je preblizu okomitom položaju.';
       return;
     }
-    msg.textContent='';
-    var tx=ax/az, ty=ay/az;
+    if(msg.textContent) msg.textContent='';
+    var t=ay/h;
     var now=performance.now();
-    if(!sm) sm={x:tx,y:ty};
+    if(sm===null) sm=t;
     else {
       var dt=Math.min(Math.max((now-lastT)/1000,0.001),0.2);
-      var k=1-Math.exp(-dt/TAU);
-      sm.x+=(tx-sm.x)*k; sm.y+=(ty-sm.y)*k;
+      sm+=(t-sm)*(1-Math.exp(-dt/TAU));
     }
     lastT=now;
     if(!held) render();
   }
 
   function render(){
-    if(!sm) return;
-    var dx=-(sm.x-off.x), dyUp=-(sm.y-off.y);
-    var pct=100*Math.hypot(dx,dyUp);
-    var rot=Math.atan2(dx,dyUp)*180/Math.PI;
+    if(sm===null) return;
+    var d=sm-off; // >0: gornji kraj mobitela je viši
+    var pct=100*Math.abs(d);
     val.innerHTML=fmt(pct)+'<small>%</small>';
-    arrow.style.transform='rotate('+rot.toFixed(1)+'deg)';
+    arrow.style.transform='rotate('+(d>0?180:0)+'deg)';
     arrow.style.opacity=pct<0.1?'.25':'1';
   }
 
@@ -124,26 +129,52 @@ button:disabled{opacity:.55}
     },2500);
   }
 
-  document.getElementById('start').addEventListener('click',function(){
-    var D=window.DeviceMotionEvent;
-    if(D&&typeof D.requestPermission==='function'){
-      D.requestPermission().then(function(r){
-        if(r==='granted') listen(); else msg.textContent='Pristup senzorima nije odobren.';
-      }).catch(function(){msg.textContent='Pristup senzorima nije odobren.';});
-    } else listen();
-    document.getElementById('startRow').style.display='none';
-  });
+  // Pokretanje senzora bez gumba; iPhone ponekad traži jedan dodir zaslona
+  function askPerm(){
+    return DeviceMotionEvent.requestPermission().then(function(r){
+      if(r==='granted'){msg.textContent=''; listen();}
+      else msg.textContent='Pristup senzorima nije odobren.';
+    });
+  }
+  function onTap(){
+    document.removeEventListener('click',onTap,true);
+    askPerm().catch(function(){msg.textContent='Pristup senzorima nije odobren.';});
+  }
+  if(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function'){
+    askPerm().catch(function(){
+      msg.textContent='Dodirnite zaslon za pokretanje senzora.';
+      document.addEventListener('click',onTap,true);
+    });
+  } else listen();
 
-  zeroBtn.addEventListener('click',function(){
-    if(!sm||zeroed) return;
-    off={x:sm.x,y:sm.y}; zeroed=true;
-    try{localStorage.setItem('nagibOff',JSON.stringify(off));}catch(e){}
+  // Gumbi koje treba držati 1 s
+  function holdButton(el,action){
+    var t=null;
+    function cancel(){ if(t){clearTimeout(t); t=null;} el.classList.remove('hold'); }
+    el.addEventListener('pointerdown',function(){
+      if(el.disabled) return;
+      cancel();
+      el.classList.add('hold');
+      t=setTimeout(function(){
+        t=null; el.classList.remove('hold');
+        if(navigator.vibrate) navigator.vibrate(40);
+        action();
+      },1000);
+    });
+    ['pointerup','pointerleave','pointercancel'].forEach(function(ev){el.addEventListener(ev,cancel);});
+    el.addEventListener('contextmenu',function(e){e.preventDefault();});
+  }
+
+  holdButton(zeroBtn,function(){
+    if(sm===null||zeroed) return;
+    off=sm; zeroed=true;
+    try{localStorage.setItem('nagibOffY',String(off));}catch(e){}
     showZero(); render();
   });
 
-  document.getElementById('reset').addEventListener('click',function(){
-    off={x:0,y:0}; zeroed=false;
-    try{localStorage.removeItem('nagibOff');}catch(e){}
+  holdButton(resetBtn,function(){
+    off=0; zeroed=false;
+    try{localStorage.removeItem('nagibOffY');}catch(e){}
     showZero(); render();
   });
 
@@ -154,10 +185,6 @@ button:disabled{opacity:.55}
     if(!held) render();
   });
 
-  if(!(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function')){
-    document.getElementById('startRow').style.display='none';
-    listen();
-  }
   if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
 })();
 </script>
