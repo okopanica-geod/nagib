@@ -30,7 +30,15 @@ button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touc
 button:disabled{opacity:.55}
 #msg{color:#d97706;font-size:14px;text-align:center;min-height:20px;max-width:340px}
 .note{color:var(--mut);font-size:12px;text-align:center;margin-top:-8px}
-.hint{color:var(--mut);font-size:13px;text-align:center;max-width:340px;line-height:1.4}
+.green{background:#16a34a;color:#fff;border-color:#16a34a}
+#help{position:fixed;inset:0;background:rgba(0,0,0,.55);display:none;align-items:center;justify-content:center;padding:16px;z-index:10}
+#help.show{display:flex}
+#help .box{background:var(--card);color:var(--fg);border:1px solid var(--line);border-radius:16px;padding:18px;max-width:360px;max-height:85vh;overflow:auto;font-size:15px;line-height:1.45}
+#help h2{font-size:17px;margin:0 0 10px}
+#help ol{margin:0 0 10px;padding-left:20px}
+#help li{margin-bottom:6px}
+#help p{margin:0 0 14px;color:var(--mut);font-size:14px}
+#help button{width:100%}
 </style>
 </head>
 <body>
@@ -48,33 +56,51 @@ button:disabled{opacity:.55}
 <div id="sub">Strelica pokazuje smjer pada (kamo teče voda)</div>
 <div id="msg"></div>
 <div class="row">
-  <button id="zero">Nuliraj</button>
+  <button id="cal">Kalibriraj</button>
   <button id="reset">Resetiraj</button>
-  <button id="hold">Zadrži</button>
 </div>
-<div class="note">Nuliraj i Resetiraj: držati 1 s</div>
-<div class="hint">Mobitel položite dužom stranom uz cijev ili letvu; smije biti zakrenut oko duže osi (i na boku). Prije mjerenja nulirajte na ravnoj podlozi; nula ostaje zapamćena dok ne pritisnete Resetiraj. Za veću točnost izmjerite i s mobitelom okrenutim za 180° pa uzmite srednju vrijednost.</div>
+<div class="row">
+  <button id="info" class="green">Upute</button>
+</div>
+<div class="note">Gumbe držati 1 s</div>
+
+<div id="help">
+  <div class="box">
+    <h2>Kalibracija</h2>
+    <ol>
+      <li>Položite mobitel dužom stranom na ravnu plohu – ne mora biti vodoravna. Polažite ga isto kao kod mjerenja (ista maskica, ista strana).</li>
+      <li>Držite <b>Kalibriraj</b> 1 s, maknite ruku i ne dirajte mobitel dok mjeri (oko 3 s).</li>
+      <li>Okrenite mobitel za 180° na istom mjestu, tako da gornji kraj dođe na mjesto donjeg.</li>
+      <li>Ponovno držite <b>Kalibriraj</b> 1 s i ne dirajte mobitel dok mjeri.</li>
+    </ol>
+    <p>Kalibracija ostaje zapamćena. Ponovite je nakon pada mobitela, promjene maskice ili velike promjene temperature. <b>Resetiraj</b> briše kalibraciju.</p>
+    <button id="closeHelp">Zatvori</button>
+  </div>
+</div>
 <script>
 (function(){
   var ios=/iPad|iPhone|iPod/.test(navigator.userAgent);
-  var TAU=0.35; // vremenska konstanta izglađivanja u sekundama
-  var sm=null, off=0, zeroed=false, held=false, lastEv=0, lastT=0, listening=false, wl=null;
+  var TAU=0.35;        // vremenska konstanta izglađivanja u sekundama
+  var SETTLE=1500;     // čekanje nakon pritiska prije mjerenja (ms)
+  var SAMPLE=2000;     // trajanje mjerenja jednog položaja (ms)
+  var sm=null, off=0, lastEv=0, lastT=0, listening=false, wl=null;
   var val=document.getElementById('val'), arrow=document.getElementById('arrow'),
-      msg=document.getElementById('msg'), zeroBtn=document.getElementById('zero'),
-      resetBtn=document.getElementById('reset');
+      msg=document.getElementById('msg'), help=document.getElementById('help');
 
-  // Nula (samo duža os); stara nula iz prijašnje verzije se odbacuje
-  try{
-    localStorage.removeItem('nagibOff');
-    var s=parseFloat(localStorage.getItem('nagibOffY'));
-    if(isFinite(s)){off=s; zeroed=true;}
-  }catch(e){}
-
-  function showZero(){
-    zeroBtn.disabled=zeroed;
-    zeroBtn.textContent=zeroed?'Nulirano':'Nuliraj';
+  // Poruke: okomiti položaj > upozorenje senzora > kalibracija
+  var vert=false, warn='', calMsg='', calMsgTimer=null;
+  function showMsg(){ msg.textContent=vert?'Mobitel je preblizu okomitom položaju.':(warn||calMsg); }
+  function setCalMsg(t,ms){
+    clearTimeout(calMsgTimer); calMsg=t; showMsg();
+    if(ms) calMsgTimer=setTimeout(function(){calMsg=''; showMsg();},ms);
   }
-  showZero();
+
+  // Kalibracija (ispravak duže osi); stare nule iz prijašnjih verzija se odbacuju
+  try{
+    localStorage.removeItem('nagibOff'); localStorage.removeItem('nagibOffY');
+    var s=parseFloat(localStorage.getItem('nagibCalY'));
+    if(isFinite(s)) off=s;
+  }catch(e){}
 
   // Ekran ostaje upaljen dok je aplikacija otvorena
   function keepAwake(){
@@ -88,28 +114,31 @@ button:disabled{opacity:.55}
 
   function fmt(n){return n.toFixed(1).replace('.',',');}
 
+  // Stanje kalibracije: 0 mirno, 1 mjeri 1. položaj, 2 čeka 2. položaj, 3 mjeri 2. položaj
+  var cal=0, r1=0, samples=[], capStart=0, capTimer=null;
+
   function onMotion(e){
     var a=e.accelerationIncludingGravity;
     if(!a||a.x==null||a.y==null||a.z==null) return;
+    if(!lastEv && warn){warn=''; showMsg();}
     lastEv=Date.now();
     var ax=a.x, ay=a.y, az=a.z;
     if(ios){ax=-ax;ay=-ay;az=-az;}
     // Nagib duže osi (y) prema horizontali; ne ovisi o zakretu oko te osi
     var h=Math.hypot(ax,az);
-    if(h<1.5){
-      msg.textContent='Mobitel je preblizu okomitom položaju.';
-      return;
-    }
-    if(msg.textContent) msg.textContent='';
+    var v=h<1.5;
+    if(v!==vert){vert=v; showMsg();}
+    if(v) return;
     var t=ay/h;
     var now=performance.now();
+    if((cal===1||cal===3)&&now>=capStart) samples.push(t);
     if(sm===null) sm=t;
     else {
       var dt=Math.min(Math.max((now-lastT)/1000,0.001),0.2);
       sm+=(t-sm)*(1-Math.exp(-dt/TAU));
     }
     lastT=now;
-    if(!held) render();
+    render();
   }
 
   function render(){
@@ -121,30 +150,74 @@ button:disabled{opacity:.55}
     arrow.style.opacity=pct<0.1?'.25':'1';
   }
 
+  function startCapture(){
+    if(cal===1||cal===3) return;
+    if(!lastEv){setCalMsg('Senzor još ne radi.',3000); return;}
+    cal=(cal===2)?3:1;
+    samples=[];
+    capStart=performance.now()+SETTLE;
+    setCalMsg((cal===1?'1.':'2.')+' položaj: ne dirajte mobitel…');
+    capTimer=setTimeout(finishCapture,SETTLE+SAMPLE);
+  }
+
+  function finishCapture(){
+    capTimer=null;
+    var first=(cal===1), n=samples.length;
+    var back=first?0:2;
+    if(n<10){
+      cal=back;
+      setCalMsg('Mjerenje nije uspjelo – mobitel ne smije biti okomit. Ponovite '+(first?'1.':'2.')+' položaj.');
+      return;
+    }
+    var mean=0,i; for(i=0;i<n;i++) mean+=samples[i]; mean/=n;
+    var sd=0; for(i=0;i<n;i++) sd+=(samples[i]-mean)*(samples[i]-mean); sd=Math.sqrt(sd/n);
+    if(sd>0.03){
+      cal=back;
+      setCalMsg('Mobitel se pomicao. Ponovite '+(first?'1.':'2.')+' položaj.');
+      return;
+    }
+    if(navigator.vibrate) navigator.vibrate(40);
+    if(first){
+      r1=mean; cal=2;
+      setCalMsg('Okrenite mobitel za 180° na istom mjestu i ponovno držite Kalibriraj 1 s.');
+      return;
+    }
+    cal=0;
+    var o=(r1+mean)/2;
+    if(Math.abs(o)>0.05){
+      setCalMsg('Razlika položaja je prevelika – okrenite mobitel točno za 180° na istom mjestu. Kalibracija nije spremljena.',8000);
+      return;
+    }
+    off=o;
+    try{localStorage.setItem('nagibCalY',String(off));}catch(e){}
+    render();
+    setCalMsg('Kalibrirano (ispravak '+fmt(100*Math.abs(o))+' %).',5000);
+  }
+
   function listen(){
     keepAwake();
     if(listening) return;
     listening=true;
     window.addEventListener('devicemotion',onMotion);
     setTimeout(function(){
-      if(!lastEv) msg.textContent='Senzor nije dostupan. Otvorite stranicu izravno u pregledniku (Chrome) i dopustite pristup senzorima.';
+      if(!lastEv){warn='Senzor nije dostupan. Otvorite stranicu izravno u pregledniku (Chrome) i dopustite pristup senzorima.'; showMsg();}
     },2500);
   }
 
   // Pokretanje senzora bez gumba; iPhone ponekad traži jedan dodir zaslona
   function askPerm(){
     return DeviceMotionEvent.requestPermission().then(function(r){
-      if(r==='granted'){msg.textContent=''; listen();}
-      else msg.textContent='Pristup senzorima nije odobren.';
+      if(r==='granted'){warn=''; showMsg(); listen();}
+      else {warn='Pristup senzorima nije odobren.'; showMsg();}
     });
   }
   function onTap(){
     document.removeEventListener('click',onTap,true);
-    askPerm().catch(function(){msg.textContent='Pristup senzorima nije odobren.';});
+    askPerm().catch(function(){warn='Pristup senzorima nije odobren.'; showMsg();});
   }
   if(window.DeviceMotionEvent&&typeof DeviceMotionEvent.requestPermission==='function'){
     askPerm().catch(function(){
-      msg.textContent='Dodirnite zaslon za pokretanje senzora.';
+      warn='Dodirnite zaslon za pokretanje senzora.'; showMsg();
       document.addEventListener('click',onTap,true);
     });
   } else listen();
@@ -154,7 +227,6 @@ button:disabled{opacity:.55}
     var t=null;
     function cancel(){ if(t){clearTimeout(t); t=null;} el.classList.remove('hold'); }
     el.addEventListener('pointerdown',function(){
-      if(el.disabled) return;
       cancel();
       el.classList.add('hold');
       t=setTimeout(function(){
@@ -167,30 +239,30 @@ button:disabled{opacity:.55}
     el.addEventListener('contextmenu',function(e){e.preventDefault();});
   }
 
-  holdButton(zeroBtn,function(){
-    if(sm===null||zeroed) return;
-    off=sm; zeroed=true;
-    try{localStorage.setItem('nagibOffY',String(off));}catch(e){}
-    showZero(); render();
+  holdButton(document.getElementById('cal'),startCapture);
+
+  holdButton(document.getElementById('reset'),function(){
+    if(capTimer){clearTimeout(capTimer); capTimer=null;}
+    cal=0; off=0;
+    try{localStorage.removeItem('nagibCalY');}catch(e){}
+    render();
+    setCalMsg('Kalibracija obrisana.',3000);
   });
 
-  holdButton(resetBtn,function(){
-    off=0; zeroed=false;
-    try{localStorage.removeItem('nagibOffY');}catch(e){}
-    showZero(); render();
-  });
-
-  document.getElementById('hold').addEventListener('click',function(){
-    held=!held;
-    this.classList.toggle('on',held);
-    this.textContent=held?'Pusti':'Zadrži';
-    if(!held) render();
-  });
+  holdButton(document.getElementById('info'),function(){ help.classList.add('show'); });
+  document.getElementById('closeHelp').addEventListener('click',function(){ help.classList.remove('show'); });
 
   // Ostatak zaslona ne reagira na dugi pritisak ni označavanje teksta
   document.addEventListener('contextmenu',function(e){e.preventDefault();});
   document.addEventListener('selectstart',function(e){e.preventDefault();});
   document.addEventListener('dblclick',function(e){e.preventDefault();});
+  // Bez zumiranja s dva prsta
+  function noPinch(e){ if(e.touches&&e.touches.length>1) e.preventDefault(); }
+  document.addEventListener('touchstart',noPinch,{passive:false});
+  document.addEventListener('touchmove',noPinch,{passive:false});
+  ['gesturestart','gesturechange','gestureend'].forEach(function(ev){
+    document.addEventListener(ev,function(e){e.preventDefault();},{passive:false});
+  });
 
   if('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(function(){});
 })();
